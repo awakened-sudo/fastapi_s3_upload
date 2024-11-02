@@ -105,7 +105,7 @@ async def generate_upload_url(upload_request: UploadRequest):
                 'Key': f'uploads/{filename}',
                 'ContentType': mimetypes.guess_type(upload_request.filename)[0],
             },
-            ExpiresIn=3600  # 1 hour
+            ExpiresIn=86400  # 1 day
         )
 
         return JSONResponse({
