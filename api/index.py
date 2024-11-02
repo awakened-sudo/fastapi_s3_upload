@@ -8,13 +8,14 @@ import mimetypes
 import smtplib
 from email.mime.text import MIMEText
 from pydantic import BaseModel
+from typing import List
 
 app = FastAPI()
 
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Adjust as needed for your security
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,43 +40,61 @@ SMTP_USERNAME = os.environ.get('SMTP_USERNAME')
 SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')
 ADMIN_EMAIL = "nifzat@gmail.com"  # Your email to receive notifications
 
+# Pydantic models
 class UploadRequest(BaseModel):
     filename: str
 
-def send_admin_notification(filename: str, filesize: int):
-    try:
-        print("Attempting to send email notification...")  # Debug log
-        
-        msg = MIMEText(f"""
-        Hello,
+class UploadedFile(BaseModel):
+    filename: str       # Stored filename on S3
+    originalName: str   # Original filename uploaded by the user
+    filesize: int
 
-        A new file has been uploaded to your S3 bucket:
-        
-        Filename: {filename}
-        Size: {format_file_size(filesize)}
-        Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-        
-        The file is available in your S3 bucket: {BUCKET_NAME}/uploads/{filename}
-        
-        Best regards,
-        Blacx Upload System
-        """)
-        
-        msg['Subject'] = f'Blacx: New File Upload - {filename}'
+class NotifyUploadRequest(BaseModel):
+    files: List[UploadedFile]
+
+def send_bulk_admin_notification(files: List[UploadedFile]):
+    try:
+        print("Attempting to send bulk email notification...")
+
+        # Build the email content
+        file_details = "\n".join([
+            f"- Original Filename: {file.originalName}\n"
+            f"  Stored Filename: {file.filename}\n"
+            f"  Size: {format_file_size(file.filesize)}\n"
+            for file in files
+        ])
+
+        msg_content = f"""
+Hello,
+
+The following files have been uploaded to your S3 bucket:
+
+{file_details}
+
+Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+They are available in your S3 bucket under: {BUCKET_NAME}/uploads/
+
+Best regards,
+Blacx Upload System
+        """
+
+        msg = MIMEText(msg_content)
+        msg['Subject'] = f'Blacx: New Bulk File Upload ({len(files)} files)'
         msg['From'] = SMTP_USERNAME
         msg['To'] = ADMIN_EMAIL
 
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            print("Connecting to SMTP server...")  # Debug log
+            print("Connecting to SMTP server...")
             server.starttls()
-            print("Logging in to SMTP server...")  # Debug log
+            print("Logging in to SMTP server...")
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            print("Sending email...")  # Debug log
+            print("Sending email...")
             server.send_message(msg)
-            print("Email sent successfully!")  # Debug log
+            print("Bulk email sent successfully!")
             return True
     except Exception as e:
-        print(f"Failed to send admin notification: {str(e)}")  # Error log
+        print(f"Failed to send bulk admin notification: {str(e)}")
         return False
 
 def format_file_size(size):
@@ -94,9 +113,9 @@ async def generate_upload_url(upload_request: UploadRequest):
             raise HTTPException(status_code=400, detail="Invalid file type")
 
         # Generate filename with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')  # Added microseconds for uniqueness
         filename = f"{timestamp}_{upload_request.filename}"
-        
+
         # Generate upload URL
         upload_url = s3_client.generate_presigned_url(
             'put_object',
@@ -113,17 +132,18 @@ async def generate_upload_url(upload_request: UploadRequest):
             "filename": filename
         })
     except Exception as e:
+        print(f"Error in generate_upload_url: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/notify-upload")
-async def notify_upload(data: dict):
+async def notify_upload(data: NotifyUploadRequest):
     try:
-        success = send_admin_notification(data['filename'], data['filesize'])
+        success = send_bulk_admin_notification(data.files)
         if not success:
             raise Exception("Failed to send email notification")
         return {"status": "success"}
     except Exception as e:
-        print(f"Error in notify_upload: {str(e)}")  # Error log
+        print(f"Error in notify_upload: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/health")
@@ -434,6 +454,8 @@ async def root():
         const progressBar = document.querySelector('.progress-bar');
         const status = document.getElementById('status');
 
+        let uploadedFilesList = []; // List to store uploaded file details
+
         function formatBytes(bytes) {
             if (bytes === 0) return '0 Bytes';
             const k = 1024;
@@ -465,9 +487,10 @@ async def root():
                     }
                 });
 
-                // Notify admin
-                await axios.post('/notify-upload', {
-                    filename: response.data.filename,
+                // Collect uploaded file details
+                uploadedFilesList.push({
+                    filename: response.data.filename, // The stored filename on S3
+                    originalName: file.name,          // The original filename
                     filesize: file.size
                 });
 
@@ -478,12 +501,14 @@ async def root():
                     <span class="success">✓</span>
                 `;
                 fileList.appendChild(li);
-                uploadedFiles.classList.add('show');
+                uploadedFiles.style.display = 'block';
 
                 return true;
             } catch (error) {
                 status.textContent = 'Error: ' + (error.response?.data?.detail || error.message);
                 status.className = 'status error';
+                status.style.display = 'block';
+                console.error('Upload error:', error);
                 return false;
             }
         }
@@ -506,13 +531,28 @@ async def root():
                 return;
             }
 
+            uploadedFilesList = []; // Reset the list before starting uploads
+
             for (const file of Array.from(files)) {
                 await uploadFile(file);
             }
             
             progressContainer.style.display = 'none';
-            status.textContent = 'All uploads completed!';
-            status.className = 'status success';
+
+            // Send a single notification after all uploads
+            if (uploadedFilesList.length > 0) {
+                try {
+                    await axios.post('/notify-upload', {
+                        files: uploadedFilesList
+                    });
+                    status.textContent = 'All uploads completed!';
+                    status.className = 'status success';
+                } catch (error) {
+                    status.textContent = 'Error: ' + (error.response?.data?.detail || error.message);
+                    status.className = 'status error';
+                }
+                status.style.display = 'block';
+            }
         }
 
         // File input change handler
