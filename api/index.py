@@ -38,7 +38,7 @@ SMTP_SERVER = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
 SMTP_USERNAME = os.environ.get('SMTP_USERNAME')
 SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')
-ADMIN_EMAIL = "nifzat@gmail.com"  # Your email to receive notifications
+ADMIN_EMAIL = os.environ.get('SMTP_USERNAME')  # Your email to receive notifications
 
 # Pydantic models
 class UploadRequest(BaseModel):
