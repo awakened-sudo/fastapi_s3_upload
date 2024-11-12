@@ -8,7 +8,11 @@ import mimetypes
 import smtplib
 from email.mime.text import MIMEText
 from pydantic import BaseModel
-from typing import List
+from typing import List, Dict
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 app = FastAPI()
 
@@ -51,6 +55,19 @@ class UploadedFile(BaseModel):
 
 class NotifyUploadRequest(BaseModel):
     files: List[UploadedFile]
+
+class MultipartUploadRequest(BaseModel):
+    filename: str
+    contentType: str
+
+class MultipartUploadComplete(BaseModel):
+    filename: str
+    uploadId: str
+    parts: List[Dict[str, str]]
+
+class MultipartUploadAbort(BaseModel):
+    filename: str
+    uploadId: str
 
 def send_bulk_admin_notification(files: List[UploadedFile]):
     try:
@@ -133,6 +150,71 @@ async def generate_upload_url(upload_request: UploadRequest):
         })
     except Exception as e:
         print(f"Error in generate_upload_url: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/initiate-multipart")
+async def initiate_multipart_upload(request: MultipartUploadRequest):
+    try:
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
+        key = f"uploads/{timestamp}_{request.filename}"
+
+        response = s3_client.create_multipart_upload(
+            Bucket=BUCKET_NAME,
+            Key=key,
+            ContentType=request.contentType
+        )
+        
+        upload_id = response['UploadId']
+        urls = []
+        total_parts = 10000
+
+        for part_number in range(1, total_parts + 1):
+            url = s3_client.generate_presigned_url(
+                'upload_part',
+                Params={
+                    'Bucket': BUCKET_NAME,
+                    'Key': key,
+                    'UploadId': upload_id,
+                    'PartNumber': part_number
+                },
+                ExpiresIn=86400
+            )
+            urls.append(url)
+
+        return {
+            "uploadId": upload_id,
+            "urls": urls,
+            "key": key
+        }
+    except Exception as e:
+        print(f"Error initiating multipart upload: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/complete-multipart")
+async def complete_multipart_upload(request: MultipartUploadComplete):
+    try:
+        s3_client.complete_multipart_upload(
+            Bucket=BUCKET_NAME,
+            Key=f"uploads/{request.filename}",
+            UploadId=request.uploadId,
+            MultipartUpload={'Parts': request.parts}
+        )
+        return {"status": "success"}
+    except Exception as e:
+        print(f"Error completing multipart upload: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/abort-multipart")
+async def abort_multipart_upload(request: MultipartUploadAbort):
+    try:
+        s3_client.abort_multipart_upload(
+            Bucket=BUCKET_NAME,
+            Key=f"uploads/{request.filename}",
+            UploadId=request.uploadId
+        )
+        return {"status": "success"}
+    except Exception as e:
+        print(f"Error aborting multipart upload: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/notify-upload")
