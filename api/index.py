@@ -19,7 +19,7 @@ app = FastAPI()
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust as needed for your security
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -42,15 +42,27 @@ SMTP_SERVER = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
 SMTP_USERNAME = os.environ.get('SMTP_USERNAME')
 SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')
-ADMIN_EMAIL = os.environ.get('SMTP_USERNAME')  # Your email to receive notifications
+ADMIN_EMAIL = os.environ.get('SMTP_USERNAME')
+
+# Content Types Mapping
+CONTENT_TYPES = {
+    '.epub': 'application/epub+zip',
+    '.pdf': 'application/pdf',
+    '.mobi': 'application/x-mobipocket-ebook',
+    '.azw': 'application/vnd.amazon.ebook',
+    '.azw3': 'application/vnd.amazon.ebook',
+    '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.zip': 'application/zip'
+}
 
 # Pydantic models
 class UploadRequest(BaseModel):
     filename: str
 
 class UploadedFile(BaseModel):
-    filename: str       # Stored filename on S3
-    originalName: str   # Original filename uploaded by the user
+    filename: str
+    originalName: str
     filesize: int
 
 class NotifyUploadRequest(BaseModel):
@@ -69,11 +81,14 @@ class MultipartUploadAbort(BaseModel):
     filename: str
     uploadId: str
 
+def get_content_type(filename: str) -> str:
+    """Get the correct content type for files"""
+    extension = os.path.splitext(filename.lower())[1]
+    return CONTENT_TYPES.get(extension, 'application/octet-stream')
+
 def send_bulk_admin_notification(files: List[UploadedFile]):
     try:
         print("Attempting to send bulk email notification...")
-
-        # Build the email content
         file_details = "\n".join([
             f"- Original Filename: {file.originalName}\n"
             f"  Stored Filename: {file.filename}\n"
@@ -130,8 +145,11 @@ async def generate_upload_url(upload_request: UploadRequest):
             raise HTTPException(status_code=400, detail="Invalid file type")
 
         # Generate filename with timestamp
-        timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')  # Added microseconds for uniqueness
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
         filename = f"{timestamp}_{upload_request.filename}"
+
+        # Get content type with fallback
+        content_type = get_content_type(upload_request.filename)
 
         # Generate upload URL
         upload_url = s3_client.generate_presigned_url(
@@ -139,7 +157,7 @@ async def generate_upload_url(upload_request: UploadRequest):
             Params={
                 'Bucket': BUCKET_NAME,
                 'Key': f'uploads/{filename}',
-                'ContentType': mimetypes.guess_type(upload_request.filename)[0],
+                'ContentType': content_type,
             },
             ExpiresIn=86400  # 1 day
         )
@@ -158,10 +176,13 @@ async def initiate_multipart_upload(request: MultipartUploadRequest):
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
         key = f"uploads/{timestamp}_{request.filename}"
 
+        # Get content type with fallback
+        content_type = get_content_type(request.filename)
+
         response = s3_client.create_multipart_upload(
             Bucket=BUCKET_NAME,
             Key=key,
-            ContentType=request.contentType
+            ContentType=content_type
         )
         
         upload_id = response['UploadId']
